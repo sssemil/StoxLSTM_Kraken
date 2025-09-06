@@ -86,7 +86,7 @@ def save_checkpoint_and_plot(model, df, norm, mean, std, epoch, is_random=False)
     return fut_df
 
 
-def train_loop(model, train_loader, val_loader, cfg, df, norm, mean, std):
+def train_loop(model, train_loader, val_loader, cfg, df, norm, mean, std, patience=5, min_delta=1e-4):
     """Main training loop."""
     # Create TensorBoard writer
     log_dir = f"{cfg.log_dir}/StoxLSTM_{cfg.seed}_{int(time.time())}"
@@ -97,11 +97,15 @@ def train_loop(model, train_loader, val_loader, cfg, df, norm, mean, std):
     best_val = float('inf')
     best_state = None
     
+    # Early stopping parameters
+    patience_counter = 0
+    
     print(f"Starting training for {cfg.epochs} epochs...")
     print(f"Device: {cfg.device}")
     print(f"Batch size: {cfg.batch_size}")
     print(f"Learning rate: {cfg.lr}")
     print(f"Beta KL: {cfg.beta_kl}")
+    print(f"Early stopping: patience={patience}, min_delta={min_delta}")
     print(f"TensorBoard logs: {log_dir}")
     print(f"To view: tensorboard --logdir={log_dir}")
     print("-" * 60)
@@ -179,16 +183,27 @@ def train_loop(model, train_loader, val_loader, cfg, df, norm, mean, std):
               f"Val Loss: {v_mean:.4f} (Recon: {v_recon_mean:.4f}, KL: {v_kl_mean:.4f}) | "
               f"Time: {epoch_time:.1f}s")
         
-        # Update best model
-        if v_mean < best_val:
+        # Early stopping logic
+        if v_mean < best_val - min_delta:
             best_val = v_mean
             best_state = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+            patience_counter = 0
             writer.add_scalar('Epoch/Best_Val_Loss', best_val, epoch)
             print(f"  → New best validation loss: {best_val:.4f}")
+        else:
+            patience_counter += 1
+            print(f"  → No improvement for {patience_counter} epochs (best: {best_val:.4f})")
         
         # Save checkpoint and plot forecast after each epoch
         print(f"  📊 Creating forecast plot for epoch {epoch}...")
         save_checkpoint_and_plot(model, df, norm, mean, std, epoch)
+        
+        # Check for early stopping
+        if patience_counter >= patience:
+            print(f"\n🛑 Early stopping triggered after {epoch} epochs!")
+            print(f"   No improvement in validation loss for {patience} epochs")
+            print(f"   Best validation loss: {best_val:.4f}")
+            break
         
         # Log CUDA memory usage if available
         if cfg.device == "cuda" and torch.cuda.is_available():
@@ -219,6 +234,8 @@ def main():
     parser.add_argument('--beta_kl', type=float, default=cfg.beta_kl, help='KL weight')
     parser.add_argument('--device', type=str, default=cfg.device, help='Device to use')
     parser.add_argument('--seed', type=int, default=cfg.seed, help='Random seed')
+    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (epochs)')
+    parser.add_argument('--min_delta', type=float, default=1e-4, help='Minimum change for improvement')
     
     args = parser.parse_args()
     
@@ -290,7 +307,8 @@ def main():
     
     # Train model
     print("🏋️ Starting training...")
-    model = train_loop(model, train_loader, val_loader, cfg, df, norm, mean, std)
+    model = train_loop(model, train_loader, val_loader, cfg, df, norm, mean, std, 
+                      patience=args.patience, min_delta=args.min_delta)
     
     print("✅ Training completed!")
 
