@@ -256,7 +256,7 @@ def main():
     
     # Rolling normalization
     norm, mean, std = compute_rolling_norm(
-        df, window=cfg.roll_days * 24 * 60, min_periods=cfg.min_periods, eps=cfg.epsilon
+        df, window=cfg.roll_window, min_periods=cfg.min_periods, eps=cfg.epsilon
     )
     valid = norm.dropna().index
     df = df.loc[valid]

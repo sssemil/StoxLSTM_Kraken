@@ -79,21 +79,30 @@ def resample_and_fill_1m(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v})
     return out
 
-def compute_rolling_norm(df: pd.DataFrame, window=43200, min_periods=43200, eps=1e-8):
+def compute_rolling_norm(df: pd.DataFrame, window=2880, min_periods=2880, eps=1e-8):
     """
-    Compute rolling normalization with no leakage.
-    Each t uses stats from t-30d..t-1
+    Compute rolling normalization using 48h window with 50% expanded bounds.
+    Each t uses min/max from t-48h..t, then expands bounds by 50% on each side.
     """
-    # Use prior window stats by shifting 1 minute
-    roll_mean = df.rolling(window=window, min_periods=min_periods).mean().shift(1)
-    roll_std = df.rolling(window=window, min_periods=min_periods).std(ddof=0).shift(1)
-
-    # Fallback for very early indices: use expanding stats (still shift 1)
-    exp_mean = df.expanding(min_periods=2).mean().shift(1)
-    exp_std = df.expanding(min_periods=2).std(ddof=0).shift(1)
-
-    mean = roll_mean.where(roll_mean.notna(), exp_mean)
-    std = roll_std.where(roll_std.notna(), exp_std)
+    # Use 48h rolling window to get min/max
+    roll_min = df.rolling(window=window, min_periods=min_periods).min()
+    roll_max = df.rolling(window=window, min_periods=min_periods).max()
+    
+    # Fallback for early indices: use expanding stats
+    exp_min = df.expanding(min_periods=2).min()
+    exp_max = df.expanding(min_periods=2).max()
+    
+    min_vals = roll_min.where(roll_min.notna(), exp_min)
+    max_vals = roll_max.where(roll_max.notna(), exp_max)
+    
+    # Expand bounds by 50% on each side
+    range_vals = max_vals - min_vals
+    expanded_min = min_vals - 0.5 * range_vals
+    expanded_max = max_vals + 0.5 * range_vals
+    
+    # Compute mean and std from expanded bounds
+    mean = (expanded_min + expanded_max) / 2
+    std = (expanded_max - expanded_min) / 6  # Approximate std from range (assuming normal-ish distribution)
     
     # Clip std to avoid very large normalized values in flat regions
     std = std.clip(lower=1e-6)

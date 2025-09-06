@@ -24,8 +24,8 @@ class Config:
     S: int = 24
 
     # Normalization
-    roll_days: int = 30
-    min_periods: int = 43200  # 30d * 24h * 60m
+    roll_window: int = 2880  # 48h * 60m (matches training horizon T)
+    min_periods: int = 2880  # 48h * 60m (minimum for 48h training horizon)
     epsilon: float = 1e-8
 
     # Model
