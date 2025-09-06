@@ -1,6 +1,6 @@
 # StoxLSTM for Kraken BTC-USD 1-Minute OHLCV
 
-LLM-slopping my way thought this paper - https://arxiv.org/pdf/2509.01187. Don't take this repo seriously.
+LLM-slopping my way through this paper - https://arxiv.org/pdf/2509.01187. Don't take this repo seriously.
 
 A modular implementation of StoxLSTM for probabilistic time-series forecasting on Kraken BTC-USD 1-minute OHLCV data with up to 48-hour forecasting capability.
 
