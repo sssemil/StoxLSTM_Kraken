@@ -9,6 +9,8 @@ import math
 import torch
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # Set backend before importing pyplot
 import matplotlib.pyplot as plt
 from datetime import datetime
 
@@ -18,42 +20,23 @@ from data_utils import (
 )
 from model import create_model
 from plot_utils import plot_ohlcv_forecast, get_actual_data_for_period, calculate_forecast_metrics, print_forecast_metrics, open_plot
+from forecast_utils import forecast_from_timestamp
 
 def load_checkpoint(checkpoint_path, device=None):
     """Load model from checkpoint."""
-    if device is None:
-        device = cfg.device
-    
+    device = device or cfg.device
     print(f"Loading checkpoint from: {checkpoint_path}")
     
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except Exception as e:
-        print(f"Error loading checkpoint: {e}")
-        print("Trying to load only the model state dict...")
-        # Try to load just the state dict
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if 'model_state_dict' not in checkpoint:
-            raise ValueError("Checkpoint does not contain 'model_state_dict'")
-    
-    # Create model
+    # Load with weights_only=False to allow config objects
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state = checkpoint.get('model_state_dict', checkpoint)  # allow raw state_dict
     model = create_model()
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    
-    # Load config if available
-    if 'config' in checkpoint:
-        try:
-            loaded_cfg = checkpoint['config']
-            print(f"Loaded config: L={loaded_cfg.L}, T={loaded_cfg.T}, P={loaded_cfg.P}, S={loaded_cfg.S}")
-            return model, loaded_cfg
-        except Exception as e:
-            print(f"Could not load config from checkpoint: {e}")
-            print("Using current config")
-            return model, cfg
-    else:
-        print("No config in checkpoint, using current config")
-        return model, cfg
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        print(f"State dict loaded with missing={len(missing)} unexpected={len(unexpected)}")
+    model.to(device).eval()
+    loaded_cfg = checkpoint.get('config', cfg)
+    return model, loaded_cfg
 
 def find_timestamp_index(df, timestamp):
     """Find the index of a timestamp in the dataframe."""
@@ -76,7 +59,9 @@ def find_timestamp_index(df, timestamp):
     
     # Make timezone aware if needed
     if ts.tz is None:
-        ts = ts.tz_localize('UTC')
+        ts = ts.tz_localize(df.index.tz or 'UTC')
+    else:
+        ts = ts.tz_convert(df.index.tz or 'UTC')
     
     # Find closest index
     try:
@@ -93,78 +78,10 @@ def find_timestamp_index(df, timestamp):
                 closest_idx = closest_idx - 1
         
         actual_ts = df.index[closest_idx]
-        print(f"Timestamp {ts} not found. Using closest: {actual_ts}")
+        delta = abs((actual_ts - ts).total_seconds())
+        print(f"Timestamp {ts} not found. Using closest: {actual_ts} (Δ={delta:.0f}s)")
         return closest_idx
 
-@torch.no_grad()
-def predict_from_timestamp(model, df_norm, df_mean, df_std, cols, timestamp, 
-                          L, T, P, S, device):
-    """Generate prediction from a specific timestamp."""
-    # Find the timestamp index
-    start_idx = find_timestamp_index(df_norm, timestamp)
-    
-    # Ensure we have enough history
-    if start_idx < L:
-        raise ValueError(f"Not enough history. Need at least {L} samples before timestamp. "
-                        f"Available: {start_idx}")
-    
-    # Get the lookback window
-    hist_start = start_idx - L
-    hist_end = start_idx
-    
-    print(f"Using history from {df_norm.index[hist_start]} to {df_norm.index[hist_end-1]}")
-    print(f"Predicting from {df_norm.index[start_idx]} for {T} minutes")
-    
-    # Prepare input data
-    C = len(cols)
-    x = torch.tensor(df_norm[list(cols)].iloc[hist_start:hist_end].values, 
-                     dtype=torch.float32).unsqueeze(0)  # [1, L, C]
-    
-    # Convert to patches
-    patches_hist_list = []
-    for c in range(C):
-        ph = to_patches(x[:, :, c].unsqueeze(-1), P, S)  # [1, Np_hist, P, 1]
-        patches_hist_list.append(ph.to(device))
-    
-    # Generate forecast
-    Np_future = math.ceil(T / S)
-    ypatch_list = model.forecast(patches_hist_list, Np_future)
-    
-    # Convert patches back to time series
-    fut_list = []
-    for arr in ypatch_list:
-        hist_len = arr.size(1) - Np_future
-        fut = arr[:, hist_len:, :] if arr.ndim == 3 else arr[:, hist_len:]
-        fut_list.append(fut.squeeze(0).cpu().numpy())  # [Np_future]
-    
-    # Interpolate to minute-level
-    fut_minute = []
-    for f in fut_list:
-        # Instead of simple repetition, use linear interpolation between patch values
-        # This creates smoother transitions and reduces straight line artifacts
-        if len(f) > 1:
-            # Create interpolation points
-            patch_indices = np.arange(len(f)) * S
-            minute_indices = np.arange(T)
-            # Interpolate between patch values
-            rep = np.interp(minute_indices, patch_indices, f)
-        else:
-            # Fallback to simple repetition if only one patch
-            rep = np.repeat(f, S)[:T]
-        fut_minute.append(rep)
-    fut_minute = np.stack(fut_minute, axis=-1)  # [T, C] (normalized)
-    
-    # Denormalize
-    mu_tail = df_mean[list(cols)].iloc[start_idx-1:start_idx].values  # [1, C]
-    sd_tail = df_std[list(cols)].iloc[start_idx-1:start_idx].values  # [1, C]
-    fut_denorm = fut_minute * (sd_tail + cfg.epsilon) + mu_tail  # [T, C]
-    
-    # Create forecast dataframe
-    start_ts = df_norm.index[start_idx]
-    idx = pd.date_range(start_ts, periods=T, freq="1min", tz=df_norm.index.tz)
-    fut_df = pd.DataFrame(fut_denorm, index=idx, columns=cols)
-    
-    return fut_df, hist_start, hist_end
 
 def plot_prediction(df, fut_df, hist_start, hist_end, timestamp, save_path=None):
     """Plot the prediction with historical context and actual data for comparison."""
@@ -210,17 +127,21 @@ def main():
     
     args = parser.parse_args()
     
+    # Update config with command line arguments
+    cfg.csv_path = args.csv_path
+    cfg.device = args.device
+    
     print("🔮 StoxLSTM Prediction")
     print("=" * 50)
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Timestamp: {args.timestamp}")
     print(f"Horizon: {args.horizon} minutes ({args.horizon/60:.1f} hours)")
-    print(f"CSV path: {args.csv_path}")
-    print(f"Device: {args.device}")
+    print(f"CSV path: {cfg.csv_path}")
+    print(f"Device: {cfg.device}")
     print("=" * 50)
     
     # Load model
-    model, model_cfg = load_checkpoint(args.checkpoint, args.device)
+    model, model_cfg = load_checkpoint(args.checkpoint, cfg.device)
     
     # Load and preprocess data
     print("📊 Loading and preprocessing data...")
@@ -245,9 +166,9 @@ def main():
     
     # Generate prediction
     print("🔮 Generating prediction...")
-    fut_df, hist_start, hist_end = predict_from_timestamp(
+    fut_df, hist_start, hist_end = forecast_from_timestamp(
         model, norm, mean, std, cfg.cols, args.timestamp,
-        model_cfg.L, args.horizon, model_cfg.P, model_cfg.S, args.device
+        model_cfg.L, args.horizon, model_cfg.P, model_cfg.S, cfg.device
     )
     
     # Print forecast summary

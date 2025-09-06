@@ -2,11 +2,15 @@
 Shared plotting utilities for StoxLSTM OHLCV visualization.
 """
 
+import matplotlib
+matplotlib.use("Agg")  # Set backend before importing pyplot
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import subprocess
 import os
+import platform
+import shutil
 from typing import Optional, Tuple
 
 
@@ -52,13 +56,23 @@ def plot_ohlcv_forecast(hist_data: pd.DataFrame,
     ax1.set_title(title, fontsize=14, fontweight='bold')
     ax1.set_ylabel('Price (USD)', fontsize=12)
     ax1.grid(True, alpha=0.3)
-    ax1.legend(loc='upper left', fontsize=8)
+    
+    # Deduplicate legend entries
+    handles, labels = ax1.get_legend_handles_labels()
+    seen = set()
+    uniq = [(h,l) for h,l in zip(handles,labels) if (l not in seen) and not seen.add(l)]
+    ax1.legend(*zip(*uniq), loc='upper left', fontsize=8)
     
     if ax2 is not None:
         ax2.set_ylabel('Volume', fontsize=12)
         ax2.set_xlabel('Time', fontsize=12)
         ax2.grid(True, alpha=0.3)
-        ax2.legend(loc='upper left', fontsize=8)
+        
+        # Deduplicate legend entries for volume plot too
+        handles, labels = ax2.get_legend_handles_labels()
+        seen = set()
+        uniq = [(h,l) for h,l in zip(handles,labels) if (l not in seen) and not seen.add(l)]
+        ax2.legend(*zip(*uniq), loc='upper left', fontsize=8)
     else:
         ax1.set_xlabel('Time', fontsize=12)
     
@@ -139,17 +153,13 @@ def get_actual_data_for_period(df: pd.DataFrame, forecast_start, forecast_end) -
         Actual data for the forecast period, or None if not available
     """
     try:
-        # Find the actual data in the forecast period
-        actual_start_idx = df.index.searchsorted(forecast_start)
-        actual_end_idx = df.index.searchsorted(forecast_end)
-        
-        if actual_start_idx < len(df) and actual_end_idx <= len(df):
-            actual_data = df.iloc[actual_start_idx:actual_end_idx].copy()
-            print(f"Found actual data for comparison: {len(actual_data)} samples")
-            return actual_data
-        else:
-            print("No actual data available for the forecast period")
-            return None
+        # Inclusive slicing by label is simplest & correct
+        actual = df.loc[forecast_start:forecast_end]
+        if len(actual):
+            print(f"Found actual data for comparison: {len(actual)} samples")
+            return actual.copy()
+        print("No actual data available for the forecast period")
+        return None
     except Exception as e:
         print(f"Could not load actual data for comparison: {e}")
         return None
@@ -211,12 +221,19 @@ def print_forecast_metrics(metrics: dict) -> None:
 def open_plot(plot_path: str) -> None:
     """Open the saved plot using the system's default image viewer."""
     try:
-        if os.path.exists(plot_path):
-            subprocess.run(['open', plot_path], check=True)
-            print(f"Opened plot: {plot_path}")
-        else:
+        if not os.path.exists(plot_path):
             print(f"Plot file not found: {plot_path}")
-    except subprocess.CalledProcessError:
-        print(f"Failed to open plot: {plot_path}")
-    except FileNotFoundError:
-        print("'open' command not found. Please open the plot manually.")
+            return
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.run(["open", plot_path], check=False)
+        elif system == "Windows":
+            os.startfile(plot_path)  # type: ignore[attr-defined]
+        else:
+            opener = shutil.which("xdg-open")
+            if opener:
+                subprocess.run([opener, plot_path], check=False)
+            else:
+                print("No system opener found; open the plot manually.")
+    except Exception as e:
+        print(f"Failed to open plot: {e}")

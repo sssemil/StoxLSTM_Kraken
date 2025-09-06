@@ -94,6 +94,9 @@ def compute_rolling_norm(df: pd.DataFrame, window=43200, min_periods=43200, eps=
 
     mean = roll_mean.where(roll_mean.notna(), exp_mean)
     std = roll_std.where(roll_std.notna(), exp_std)
+    
+    # Clip std to avoid very large normalized values in flat regions
+    std = std.clip(lower=1e-6)
 
     norm = (df - mean) / (std + eps)
     return norm, mean, std
@@ -183,7 +186,11 @@ def batch_to_patches(batch, P, S):
         ph = to_patches(x_c, P, S)  # [B, Np_hist, P, 1]
         x_all = torch.cat([x_c, y[:, :, c].unsqueeze(-1)], dim=1)  # [B, L+T, 1]
         pa = to_patches(x_all, P, S)  # [B, Np_all, P, 1]
-        tgt = ph.mean(dim=2).squeeze(-1)  # [B, Np_hist]
+        
+        # Fix: Use future patch values as targets for proper forecasting
+        # First Nh patches are history, next are future
+        Nh = ph.size(1)
+        tgt = pa[:, 1:Nh+1, :, :].mean(dim=2).squeeze(-1)  # [B, Np_hist] - predict next patch mean
 
         patches_hist_list.append(ph)
         patches_all_list.append(pa)

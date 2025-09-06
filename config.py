@@ -49,8 +49,8 @@ class Config:
     
     def __post_init__(self):
         """Validate configuration after initialization."""
-        if self.T > 2880:  # 48 hours
-            raise ValueError("T (forecast horizon) should not exceed 2880 minutes (48 hours)")
+        if self.T > 4320:  # 72 hours - relaxed from 48h to match README
+            raise ValueError("T (forecast horizon) should not exceed 4320 minutes (72 hours)")
         
         if self.L < 1440:  # 24 hours minimum
             print(f"Warning: L (lookback) is {self.L} minutes, consider using at least 1440 (24h)")
